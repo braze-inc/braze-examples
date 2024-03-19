@@ -34,6 +34,14 @@ AS $$
   def array_diff(arr_1, arr_2):
     if arr_2 == None or arr_2 == []:
         return None
+    
+    if arr_1 == None or arr_1 == []:
+      return arr_2
+
+    overlap = set(arr_1).intersection(arr_2)
+    if overlap == set():
+      return arr_2
+    
     removed = set(arr_1).difference(arr_2)
     added = set(arr_2).difference(arr_1)
 
@@ -60,34 +68,6 @@ $$;
 -- COMMAND ----------
 
 CREATE FUNCTION IF NOT EXISTS <schema_name>.json_deep_diff(a STRING, b STRING)
-RETURNS STRING
-LANGUAGE PYTHON
-AS $$
-import json
-def deep_diff(obj_a, obj_b):
-    keys = list(obj_a.keys())
-    keys.extend(obj_b.keys())
-    keys = list(set(keys))
-    update_obj = {}
-    for key in keys:
-        val_a = obj_a.get(key)
-        val_b = obj_b.get(key)
-        if str(val_a) == str(val_b):
-            continue
-        if type(val_b) == type({}) and val_a != None:
-            val_b = deep_diff(val_a, val_b)
-        update_obj[key] = val_b
-    return update_obj
-
-obj_a = json.loads(a)
-obj_b = json.loads(b)
-diff = deep_diff(obj_a, obj_b)
-return json.dumps(diff)
-$$;
-
--- COMMAND ----------
-
-CREATE FUNCTION IF NOT EXISTS <schema_name>.json_array_deep_diff(a STRING, b STRING, id_key STRING)
 RETURNS STRING
 LANGUAGE PYTHON
 AS $$
@@ -119,6 +99,21 @@ def arr_of_objs_diff(arr_a, arr_b, id_field):
     for row in arr_b:
         key = row[id_field]
         objs_b[key] = row
+
+    updates = []
+    overlap = set(objs_b.keys()).intersection(objs_a.keys())
+    for key in overlap:
+        diff = deep_diff(objs_a[key], objs_b[key])
+        if diff == {}:
+            continue
+        updates.append({
+            "__dollar__identifier_key": id_field,
+            "__dollar__identifier_value": key,
+            "__dollar__new_object": diff
+        })
+    
+    if overlap == set():
+      return arr_b
     
     deletions = []
     to_delete = set(objs_a.keys()).difference(objs_b.keys())
@@ -133,18 +128,6 @@ def arr_of_objs_diff(arr_a, arr_b, id_field):
     for key in to_add:
         additions.append(objs_b[key])
 
-    updates = []
-    overlap = set(objs_b.keys()).intersection(objs_a.keys())
-    for key in overlap:
-        diff = deep_diff(objs_a[key], objs_b[key])
-        if diff == {}:
-            continue
-        updates.append({
-            "__dollar__identifier_key": id_field,
-            "__dollar__identifier_value": key,
-            "__dollar__new_object": diff
-        })
-
     update_obj = {}
     if len(deletions) > 0:
         update_obj['__dollar__remove'] = deletions
@@ -154,6 +137,10 @@ def arr_of_objs_diff(arr_a, arr_b, id_field):
 
     if len(updates) > 0:
         update_obj['__dollar__update'] = updates
+    
+    if update_obj == {}:
+      # arrays are the same, just in a different order.
+      return None
 
     return update_obj
 
@@ -385,10 +372,16 @@ insert into <schema_name>.<users_model>_braze_output
   , current_timestamp() as updated_at
   from <schema_name>.<users_model>_granular_diff
   where key != 'external_id'
+  and not (diff = "null" and new_value != "null")
   and created_ts > (
     select coalesce(max(updated_at), to_timestamp('1970-01-01', 'yyyy-MM-dd'))
     from <schema_name>.<users_model>_braze_output
   )
   group by user_id
 
+-- COMMAND ----------
+
+-- save the table as a checkpoint
+create or replace table <schema_name>.<bu_name>_users_diff_checkpoint as 
+  select * from <schema_name>.<bu_name>_users
 
