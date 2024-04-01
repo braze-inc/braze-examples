@@ -1,2 +1,2 @@
 # braze-examples
-Sample code from Braze and our community
+Sample code and payloads from Braze and our community
